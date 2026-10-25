@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#1b2a20">
+<link rel="manifest" href="manifest.json">
+<title>G30 Logic Field Geology</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/proj4@2.11.0/dist/proj4.js"></script>
+<script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
+<script src="export.js"></script>
+<style>
+*{box-sizing:border-box}html,body{margin:0;height:100%;font-family:system-ui,sans-serif;background:#111;color:#eee}
+#map{position:absolute;top:0;left:0;right:0;bottom:118px}
+#bar{position:absolute;left:0;right:0;bottom:0;height:118px;background:#1b2a20;padding:6px;display:flex;flex-direction:column;gap:5px}
+.row{display:flex;gap:5px;overflow-x:auto}
+button,select{background:#2e4636;color:#fff;border:1px solid #4d6b56;border-radius:8px;padding:8px 10px;font-size:14px;white-space:nowrap}
+button.on{background:#c9822b;border-color:#e0a050}
+#coord{font:13px monospace;color:#cfe;padding:2px 4px;white-space:nowrap;overflow:hidden}
+.panel{position:absolute;left:8px;right:8px;top:8px;max-height:70%;overflow:auto;background:#1e2622ee;border:1px solid #4d6b56;border-radius:10px;padding:10px;z-index:1000;display:none}
+.panel textarea,.panel input{width:100%;background:#0d1310;color:#eee;border:1px solid #4d6b56;border-radius:6px;padding:6px;font-size:14px}
+.panel textarea{height:110px}
+.panel .big{display:block;width:100%;margin:6px 0;padding:12px}
+#nav{position:absolute;top:8px;left:50%;transform:translateX(-50%);background:#c9822b;color:#000;font-weight:bold;padding:6px 12px;border-radius:8px;z-index:900;display:none}
+.small{font-size:12px;color:#9ab}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="nav"></div>
+<div id="bar">
+ <div id="coord">Waiting for GPS…</div>
+ <div class="row">
+  <button id="bGps">GPS</button><button id="bCompass">Compass</button><button id="bTrack">Record track</button>
+  <button data-mode="point">Point</button><button data-mode="line">Line</button><button data-mode="polygon">Polygon</button>
+  <button id="bFinish">Finish</button><button id="bUndo">Undo</button>
+ </div>
+ <div class="row">
+  <select id="crs"></select>
+  <button id="bOffline">Save area offline</button><button id="bFeat">Features</button>
+  <button id="bNotes">Notes</button><button id="bSum">Summarize</button><button id="bExport">Export</button>
+ </div>
+</div>
+
+<div class="panel" id="pFeat"><b>Features</b> <button onclick="hide('pFeat')">Close</button><div id="featList"></div></div>
+<div class="panel" id="pNotes"><b>Field notes</b> <button onclick="hide('pNotes')">Close</button>
+ <textarea id="notes" placeholder="Field notes (saved on the phone automatically)"></textarea></div>
+<div class="panel" id="pSum"><b>Document summary</b> <button onclick="hide('pSum')">Close</button>
+ <p class="small">Paste text or load a .txt file. Needs internet; if offline, it is queued and runs when signal returns.</p>
+ <input id="apiKey" type="password" placeholder="Anthropic API key (stored only on this phone)">
+ <input id="docFile" type="file" accept=".txt,.md,.csv">
+ <textarea id="docText" placeholder="Paste document text here"></textarea>
+ <button id="bRunSum">Summarize</button><div id="sumOut" style="white-space:pre-wrap;margin-top:8px"></div></div>
+<div class="panel" id="pOff"><b>Save area for offline use</b> <button onclick="hide('pOff')">Close</button>
+ <p class="small">Downloads imagery for the area currently on screen, from this zoom down to the max zoom chosen. Do this while you have signal.</p>
+ Max zoom: <select id="maxZ"><option>15</option><option selected>16</option><option>17</option><option>18</option></select>
+ <button id="bDl">Download</button><div id="dlStat"></div></div>
+<div class="panel" id="pExp"><b>Export</b> <button onclick="hide('pExp')">Close</button>
+ <p class="small">CSV and DXF use UTM coordinates (meters) in the datum chosen in the dropdown. CSV opens directly in Excel.</p>
+ <button class="big" id="eCsv">Excel / CSV</button>
+ <button class="big" id="eDxf">AutoCAD DXF</button>
+ <button class="big" id="eJson">GeoJSON</button></div>
+
+<script>
+// ---------- storage ----------
+const S={get:(k,d)=>{try{return JSON.parse(localStorage.getItem(k))??d}catch(e){return d}},set:(k,v)=>localStorage.setItem(k,JSON.stringify(v))};
+const show=id=>document.getElementById(id).style.display='block', hide=id=>document.getElementById(id).style.display='none';
+window.hide=hide;
+
+// ---------- map & imagery ----------
+const v0=S.get('view',[34.33,-116.85,12]);
+const map=L.map('map',{zoomControl:false}).setView([v0[0],v0[1]],v0[2]);
+const layers={
+ 'USGS Imagery':L.tileLayer('https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer/tile/{z}/{y}/{x}',{maxZoom:18,maxNativeZoom:16,attribution:'USGS'}),
+ 'USGS Topo':L.tileLayer('https://basemap.nationalmap.gov/arcgis/rest/services/USGSTopo/MapServer/tile/{z}/{y}/{x}',{maxZoom:18,maxNativeZoom:16,attribution:'USGS'}),
+ 'USGS Imagery+Topo':L.tileLayer('https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryTopo/MapServer/tile/{z}/{y}/{x}',{maxZoom:18,maxNativeZoom:16,attribution:'USGS'}),
+ 'OpenTopoMap':L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',{maxZoom:17,attribution:'OpenTopoMap (CC-BY-SA)'})
+};
+layers['USGS Imagery'].addTo(map);
+L.control.layers(layers,null,{position:'topright'}).addTo(map);
+L.control.scale({imperial:true,position:'topleft'}).addTo(map);
+map.on('moveend',()=>{const c=map.getCenter();S.set('view',[c.lat,c.lng,map.getZoom()])});
+
+// ---------- coordinate systems ----------
+const NAD27='+towgs84=-8,160,176,0,0,0,0';
+const CRS={
+ 'WGS84 Lat/Lon':{p:'EPSG:4326'},
+ 'NAD83 Lat/Lon':{p:'+proj=longlat +ellps=GRS80 +towgs84=0,0,0 +no_defs'},
+ 'NAD27 Lat/Lon':{p:'+proj=longlat +ellps=clrk66 '+NAD27+' +no_defs'},
+ 'NAD83 UTM (auto zone)':{utm:'+ellps=GRS80 +towgs84=0,0,0'},
+ 'NAD27 UTM (auto zone)':{utm:'+ellps=clrk66 '+NAD27},
+ 'WGS84 UTM (auto zone)':{utm:'+datum=WGS84'}
+};
+const sel=document.getElementById('crs');
+Object.keys(CRS).forEach(k=>sel.add(new Option(k,k)));sel.value=S.get('crs','NAD83 Lat/Lon');
+sel.onchange=()=>{S.set('crs',sel.value);updCoord();renderList()};
+function fmt(lat,lng){
+ const c=CRS[sel.value];
+ if(c.utm){const z=Math.floor((lng+180)/6)+1;const [e,n]=proj4('EPSG:4326',`+proj=utm +zone=${z} ${c.utm} +units=m +no_defs`,[lng,lat]);
+  return `Z${z}${lat>=0?'N':'S'} E ${e.toFixed(1)}  N ${n.toFixed(1)}`;}
+ const [x,y]=proj4('EPSG:4326',c.p,[lng,lat]);return `${y.toFixed(6)}, ${x.toFixed(6)}`;
+}
+
+// ---------- GPS & track ----------
+let me=null,acc=null,pos=null,watching=false,recording=false,track=L.polyline([],{color:'#00e5ff',weight:3}).addTo(map),follow=true;
+track.setLatLngs(S.get('track',[]));
+function onPos(p){
+ pos=L.latLng(p.coords.latitude,p.coords.longitude);
+ if(!me){me=L.circleMarker(pos,{radius:7,color:'#fff',fillColor:'#1e90ff',fillOpacity:1}).addTo(map);acc=L.circle(pos,{radius:p.coords.accuracy,weight:1,fillOpacity:.1}).addTo(map);map.setView(pos,16)}
+ me.setLatLng(pos);acc.setLatLng(pos).setRadius(p.coords.accuracy);
+ if(follow)map.panTo(pos,{animate:false});
+ if(recording){track.addLatLng(pos);S.set('track',track.getLatLngs().map(l=>[l.lat,l.lng]))}
+ updCoord(p.coords.accuracy,p.coords.altitude);updNav();
+}
+let wid=null;
+document.getElementById('bGps').onclick=e=>{
+ if(watching){navigator.geolocation.clearWatch(wid);watching=false;e.target.classList.remove('on');return}
+ wid=navigator.geolocation.watchPosition(onPos,err=>alert('GPS: '+err.message),{enableHighAccuracy:true,maximumAge:2000});watching=true;e.target.classList.add('on');follow=true;
+};
+map.on('dragstart',()=>follow=false);
+document.getElementById('bTrack').onclick=e=>{recording=!recording;e.target.classList.toggle('on',recording);e.target.textContent=recording?'Stop track':'Record track'};
+document.getElementById('bCompass').onclick=()=>{location.href='compass.html'};
+function updCoord(a,alt){
+ if(!pos)return;
+ document.getElementById('coord').textContent=fmt(pos.lat,pos.lng)+(a?`  ±${Math.round(a)}m`:'')+(alt!=null?`  El ${Math.round(alt*3.28084)}ft`:'');
+}
+
+// ---------- drawing ----------
+let feats=S.get('feats',[]),mode=null,draft=[],draftLayer=null,featLayer=L.featureGroup().addTo(map);
+document.querySelectorAll('[data-mode]').forEach(b=>b.onclick=()=>{
+ mode=mode===b.dataset.mode?null:b.dataset.mode;draft=[];redrawDraft();
+ document.querySelectorAll('[data-mode]').forEach(x=>x.classList.toggle('on',x.dataset.mode===mode));
+});
+map.on('click',e=>{
+ if(!mode)return;
+ if(mode==='point'){addFeat('point',[[e.latlng.lat,e.latlng.lng]]);return}
+ draft.push([e.latlng.lat,e.latlng.lng]);redrawDraft();
+});
+function redrawDraft(){if(draftLayer)map.removeLayer(draftLayer);draftLayer=null;if(!draft.length)return;
+ draftLayer=(mode==='polygon'&&draft.length>2?L.polygon(draft,{color:'#ff0',dashArray:'5'}):L.polyline(draft,{color:'#ff0',dashArray:'5'})).addTo(map);}
+document.getElementById('bUndo').onclick=()=>{draft.pop();redrawDraft()};
+document.getElementById('bFinish').onclick=()=>{
+ if(mode==='line'&&draft.length>1)addFeat('line',draft);
+ else if(mode==='polygon'&&draft.length>2)addFeat('polygon',draft);
+ draft=[];redrawDraft();
+};
+function measure(f){
+ const ll=f.c.map(p=>[p[1],p[0]]);
+ if(f.t==='line'){const km=turf.length(turf.lineString(ll));return `${(km*3280.84).toFixed(0)} ft (${(km*1000).toFixed(0)} m)`}
+ if(f.t==='polygon'){const m2=turf.area(turf.polygon([[...ll,ll[0]]]));return `${(m2/4046.856).toFixed(2)} ac | ${(m2/10000).toFixed(2)} ha | ${Math.round(m2*10.7639).toLocaleString()} sq ft`}
+ return fmt(f.c[0][0],f.c[0][1]);
+}
+function addFeat(t,c){
+ const name=prompt(`Name this ${t}:`,`${t[0].toUpperCase()+t.slice(1)} ${feats.length+1}`);if(name===null)return;
+ const note=prompt('Note (lithology, strike/dip, sample #…):','')||'';
+ feats.push({t,c,name,note,time:new Date().toISOString()});S.set('feats',feats);drawFeats();
+}
+function drawFeats(){
+ featLayer.clearLayers();
+ feats.forEach((f,i)=>{
+  const l=f.t==='point'?L.circleMarker(f.c[0],{radius:6,color:'#ff3b3b',fillOpacity:.9}):f.t==='line'?L.polyline(f.c,{color:'#ff3b3b',weight:3}):L.polygon(f.c,{color:'#ff3b3b',weight:2,fillOpacity:.15});
+  l.bindPopup(()=>`<b>${f.name}</b><br>${measure(f)}<br>${f.note||''}<br><button onclick="goTo(${i})">Navigate here</button>`);
+  l.addTo(featLayer);
+ });
+ renderList();
+}
+function renderList(){
+ document.getElementById('featList').innerHTML=feats.map((f,i)=>`<div style="border-bottom:1px solid #333;padding:6px 0"><b>${f.name}</b> (${f.t})<br><span class="small">${measure(f)}</span><br>${f.note||''}<br>
+  <button onclick="zoomF(${i})">Show</button> <button onclick="goTo(${i})">Navigate</button> <button onclick="editF(${i})">Edit note</button> <button onclick="delF(${i})">Delete</button></div>`).join('')||'No features yet.';
+}
+const bounds=f=>L.latLngBounds(f.c);
+window.zoomF=i=>{hide('pFeat');const f=feats[i];f.t==='point'?map.setView(f.c[0],17):map.fitBounds(bounds(f))};
+window.editF=i=>{const n=prompt('Note:',feats[i].note);if(n!==null){feats[i].note=n;S.set('feats',feats);drawFeats()}};
+window.delF=i=>{if(confirm('Delete '+feats[i].name+'?')){feats.splice(i,1);S.set('feats',feats);drawFeats()}};
+document.getElementById('bFeat').onclick=()=>{renderList();show('pFeat')};
+// pick up readings saved from the compass page
+window.addEventListener('pageshow',()=>{feats=S.get('feats',[]);drawFeats()});
+
+// ---------- navigate to target (offline, GPS only) ----------
+let target=null,navLine=null;
+window.goTo=i=>{const f=feats[i];target=f.t==='point'?L.latLng(f.c[0]):bounds(f).getCenter();target.name=f.name;hide('pFeat');map.closePopup();updNav();
+ if(!watching)document.getElementById('bGps').click();};
+function updNav(){
+ const box=document.getElementById('nav');
+ if(!target||!pos){box.style.display='none';if(navLine){map.removeLayer(navLine);navLine=null}return}
+ const d=pos.distanceTo(target),br=(turf.bearing([pos.lng,pos.lat],[target.lng,target.lat])+360)%360;
+ const dirs=['N','NE','E','SE','S','SW','W','NW'];
+ box.innerHTML=`→ ${target.name}: ${d>1609?(d/1609.34).toFixed(2)+' mi':Math.round(d*3.28084)+' ft'} @ ${br.toFixed(0)}° ${dirs[Math.round(br/45)%8]} <span onclick="clearNav()" style="margin-left:8px">✕</span>`;
+ box.style.display='block';
+ if(navLine)map.removeLayer(navLine);navLine=L.polyline([pos,target],{color:'#c9822b',dashArray:'8'}).addTo(map);
+}
+window.clearNav=()=>{target=null;updNav()};
+
+// ---------- notes ----------
+const notes=document.getElementById('notes');notes.value=S.get('notes','');notes.oninput=()=>S.set('notes',notes.value);
+document.getElementById('bNotes').onclick=()=>show('pNotes');
+
+// ---------- offline tile download ----------
+document.getElementById('bOffline').onclick=()=>show('pOff');
+document.getElementById('bDl').onclick=async()=>{
+ const layer=Object.values(layers).find(l=>map.hasLayer(l));const maxZ=+document.getElementById('maxZ').value;
+ const b=map.getBounds(),urls=[];
+ for(let z=Math.max(map.getZoom()-2,8);z<=maxZ;z++){
+  const nz=Math.min(z,layer.options.maxNativeZoom||z);
+  const p1=map.project(b.getNorthWest(),nz).divideBy(256).floor(),p2=map.project(b.getSouthEast(),nz).divideBy(256).floor();
+  for(let x=p1.x;x<=p2.x;x++)for(let y=p1.y;y<=p2.y;y++)urls.push(L.Util.template(layer._url,{s:'a',z:nz,x,y}));
+ }
+ const uniq=[...new Set(urls)],st=document.getElementById('dlStat');
+ if(uniq.length>8000&&!confirm(uniq.length+' tiles. That is a lot of storage. Continue?'))return;
+ const cache=await caches.open('g30-tiles');let fail=0;
+ for(let i=0;i<uniq.length;i+=6){
+  await Promise.all(uniq.slice(i,i+6).map(u=>fetch(u,{mode:'cors'}).then(r=>r.ok?cache.put(u,r):fail++).catch(()=>fail++)));
+  st.textContent=`${Math.min(i+6,uniq.length)}/${uniq.length} tiles saved${fail?`, ${fail} failed`:''}`;
+ }
+ st.textContent+=' — done. This area now works without signal.';
+};
+
+// ---------- document summary (queued offline) ----------
+const key=document.getElementById('apiKey');key.value=S.get('key','');key.onchange=()=>S.set('key',key.value);
+document.getElementById('docFile').onchange=async e=>{const f=e.target.files[0];if(f)document.getElementById('docText').value=await f.text()};
+document.getElementById('bSum').onclick=()=>show('pSum');
+async function summarize(text){
+ const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'content-type':'application/json','x-api-key':S.get('key',''),'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+  body:JSON.stringify({model:'claude-sonnet-4-5',max_tokens:1500,messages:[{role:'user',content:'You are assisting a California Professional Geologist in the field. Summarize this document: key findings, site conditions, hazards, coordinates/locations mentioned, and action items. Be concise.\n\n'+text.slice(0,150000)}]})});
+ const j=await r.json();if(!r.ok)throw new Error(j.error?.message||r.status);return j.content.map(c=>c.text).join('');
+}
+async function runQueue(){
+ if(!navigator.onLine)return;const q=S.get('sumQ',[]);if(!q.length)return;const out=document.getElementById('sumOut');
+ while(q.length){try{const s=await summarize(q[0]);const saved=S.get('sums',[]);saved.unshift({time:new Date().toISOString(),s});S.set('sums',saved);out.textContent=s;q.shift();S.set('sumQ',q)}catch(e){out.textContent='Error: '+e.message;break}}
+}
+document.getElementById('bRunSum').onclick=()=>{
+ const t=document.getElementById('docText').value.trim();if(!t)return;
+ const q=S.get('sumQ',[]);q.push(t);S.set('sumQ',q);
+ document.getElementById('sumOut').textContent=navigator.onLine?'Summarizing…':'No signal — queued. It will run automatically when you are back online.';runQueue();
+};
+window.addEventListener('online',runQueue);
+document.getElementById('sumOut').textContent=(S.get('sums',[])[0]||{}).s||'';
+
+// ---------- export: CSV (Excel), DXF, GeoJSON ----------
+const expData=()=>({feats,track:track.getLatLngs(),notes:S.get('notes',''),crs:sel.value,fmt,measure});
+document.getElementById('bExport').onclick=()=>show('pExp');
+document.getElementById('eCsv').onclick=()=>G30Export.csv(expData());
+document.getElementById('eDxf').onclick=()=>G30Export.dxf(expData());
+document.getElementById('eJson').onclick=()=>G30Export.geojson(expData());
+
+drawFeats();
+if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js');
+</script>
+</body>
+</html>

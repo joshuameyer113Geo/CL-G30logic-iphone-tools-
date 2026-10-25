@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#1b2a20">
+<link rel="manifest" href="manifest.json">
+<title>G30 Compass</title>
+<style>
+*{box-sizing:border-box}html,body{margin:0;height:100%;font-family:system-ui,sans-serif;background:#111;color:#eee;text-align:center}
+#top{display:flex;justify-content:space-between;align-items:center;padding:8px;background:#1b2a20}
+button,select,input{background:#2e4636;color:#fff;border:1px solid #4d6b56;border-radius:8px;padding:9px 12px;font-size:15px}
+button.on{background:#c9822b;border-color:#e0a050}
+#clock{font:600 28px monospace;margin-top:8px}#date{font-size:14px;color:#9ab}
+#dialWrap{position:relative;width:min(84vw,340px);height:min(84vw,340px);margin:10px auto}
+#dial{width:100%;height:100%}
+#lubber{position:absolute;top:-4px;left:50%;transform:translateX(-50%);width:0;height:0;border-left:11px solid transparent;border-right:11px solid transparent;border-top:22px solid #ff3b3b}
+#hdg{font:700 46px monospace}#hdgSub{font-size:14px;color:#9ab;min-height:18px}
+#sd{font:600 18px monospace;margin:6px 0;color:#cfe}
+.row{display:flex;gap:6px;justify-content:center;flex-wrap:wrap;margin:6px}
+#msg{font-size:13px;color:#e0a050;padding:0 12px;min-height:16px}
+.small{font-size:12px;color:#9ab}
+</style>
+</head>
+<body>
+<div id="top"><button onclick="location.href='index.html'">← Map</button><b>Compass</b><button id="bStart">Start</button></div>
+<div id="clock">--:--:--</div><div id="date"></div>
+<div id="dialWrap"><svg id="dial" viewBox="-160 -160 320 320"><g id="rose"></g></svg><div id="lubber"></div></div>
+<div id="hdg">---°</div><div id="hdgSub">Tap Start</div>
+<div id="sd">Strike/Dip: --</div>
+<div id="msg"></div>
+<div class="row">
+ <select id="ref"><option value="true">True north</option><option value="mag">Magnetic north</option></select>
+ <label class="small">Declination °E <input id="decl" type="number" step="0.1" style="width:80px"></label>
+</div>
+<div class="row"><button id="bHold">Hold</button><button id="bSave">Save to map</button></div>
+<p class="small">Lay the phone flat on a bedding or joint surface for strike/dip (right-hand rule). Keep it away from metal, magnets and vehicles. If readings jump, move the phone in a figure-8 to calibrate.</p>
+
+<script>
+const S={get:(k,d)=>{try{return JSON.parse(localStorage.getItem(k))??d}catch(e){return d}},set:(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}};
+const $=id=>document.getElementById(id);
+const norm=a=>((a%360)+360)%360;
+
+// ---------- clock ----------
+function tick(){const n=new Date();$('clock').textContent=n.toLocaleTimeString([], {hour12:false});
+ $('date').textContent=n.toLocaleDateString([], {weekday:'short',year:'numeric',month:'short',day:'numeric'})+'  |  UTC '+n.toISOString().slice(11,19);}
+tick();setInterval(tick,1000);
+
+// ---------- dial ----------
+(function(){let g='';for(let d=0;d<360;d+=5){const big=d%30===0,r1=big?126:d%10===0?134:139;
+ g+=`<line x1="0" y1="-145" x2="0" y2="-${r1}" stroke="${big?'#fff':'#789'}" stroke-width="${big?2.5:1.2}" transform="rotate(${d})"/>`;
+ if(big&&d%90)g+=`<text x="0" y="-108" fill="#cfe" font-size="15" text-anchor="middle" dominant-baseline="middle" transform="rotate(${d})">${d}</text>`;}
+ [['N',0,'#ff3b3b'],['E',90,'#fff'],['S',180,'#fff'],['W',270,'#fff']].forEach(([t,d,c])=>g+=`<text x="0" y="-104" fill="${c}" font-size="26" font-weight="700" text-anchor="middle" dominant-baseline="middle" transform="rotate(${d})">${t}</text>`);
+ g+='<circle r="148" fill="none" stroke="#4d6b56" stroke-width="3"/><circle r="4" fill="#c9822b"/>';$('rose').innerHTML=g;})();
+
+// ---------- settings ----------
+const decl=$('decl'),ref=$('ref');
+decl.value=S.get('decl',11.3);ref.value=S.get('ref','true');
+decl.onchange=()=>S.set('decl',parseFloat(decl.value)||0);ref.onchange=()=>S.set('ref',ref.value);
+
+// ---------- sensor: iOS webkitCompassHeading, Android deviceorientationabsolute; relative readings ignored ----------
+let magHdg=null,beta=0,gamma=0,sx=0,sy=0,held=false,last=0,src='';
+function screenAngle(){return (screen.orientation&&screen.orientation.angle)||window.orientation||0}
+function onOri(e){
+ let h=null;
+ if(typeof e.webkitCompassHeading==='number'&&!isNaN(e.webkitCompassHeading)){h=e.webkitCompassHeading;src='iOS compass';}
+ else if((e.type==='deviceorientationabsolute'||e.absolute===true)&&e.alpha!=null){h=360-e.alpha;src='absolute sensor';}
+ if(e.beta!=null){beta=e.beta;gamma=e.gamma;}
+ if(h==null)return;
+ h=norm(h+screenAngle());
+ const r=h*Math.PI/180;sx=sx*0.8+Math.sin(r)*0.2;sy=sy*0.8+Math.cos(r)*0.2; // smoothing across north
+ magHdg=norm(Math.atan2(sx,sy)*180/Math.PI);last=Date.now();
+}
+function begin(){
+ window.addEventListener('deviceorientationabsolute',onOri,true);
+ window.addEventListener('deviceorientation',onOri,true);
+ $('bStart').classList.add('on');$('bStart').textContent='Running';
+ setTimeout(()=>{if(!last)$('msg').textContent='No north-referenced compass data from this device/browser. Try Chrome on Android or Safari on iPhone.'},3000);
+}
+$('bStart').onclick=()=>{
+ if(typeof DeviceOrientationEvent!=='undefined'&&typeof DeviceOrientationEvent.requestPermission==='function'){
+  DeviceOrientationEvent.requestPermission().then(r=>r==='granted'?begin():$('msg').textContent='Motion & orientation access was denied. Enable it in Safari settings.').catch(()=>$('msg').textContent='Compass not supported here.');
+ }else begin();
+};
+if(!(typeof DeviceOrientationEvent!=='undefined'&&typeof DeviceOrientationEvent.requestPermission==='function'))begin();
+
+// ---------- strike/dip from tilt (plane of the phone back) ----------
+function strikeDip(hdgTrue){
+ const b=beta*Math.PI/180,g=gamma*Math.PI/180;
+ const ux=-Math.sin(g)*Math.cos(b),uy=Math.sin(b),uz=Math.cos(g)*Math.cos(b); // up vector in device frame
+ const dip=Math.acos(Math.min(1,Math.abs(uz)))*180/Math.PI;
+ if(dip<1)return {dip:0,dipDir:null,strike:null};
+ const rel=Math.atan2(-ux,-uy)*180/Math.PI; // downslope direction relative to phone top, clockwise
+ const dipDir=norm(hdgTrue+rel);return {dip,dipDir,strike:norm(dipDir-90)};
+}
+
+// ---------- render loop ----------
+let shown=null;
+function render(){
+ if(!held&&magHdg!=null){
+  const d=parseFloat(decl.value)||0,isTrue=ref.value==='true',h=norm(magHdg+(isTrue?d:0));
+  const sd=strikeDip(h);
+  shown={h,isTrue,sd,mag:magHdg};
+  $('rose').setAttribute('transform',`rotate(${-h})`);
+  $('hdg').textContent=String(Math.round(h)%360).padStart(3,'0')+'°';
+  const dirs=['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
+  $('hdgSub').textContent=`${dirs[Math.round(h/22.5)%16]}  ${isTrue?'True':'Magnetic'}  (${src})`;
+  $('sd').textContent=sd.strike==null?'Strike/Dip: flat (0°)':`Strike ${String(Math.round(sd.strike)).padStart(3,'0')}°  Dip ${Math.round(sd.dip)}° → ${String(Math.round(sd.dipDir)).padStart(3,'0')}°`;
+  if(last&&Date.now()-last>3000)$('msg').textContent='Sensor stopped updating.';else if(last)$('msg').textContent='';
+ }
+ requestAnimationFrame(render);
+}
+render();
+
+$('bHold').onclick=e=>{held=!held;e.target.classList.toggle('on',held);e.target.textContent=held?'Release':'Hold'};
+
+// ---------- save reading as a point on the map ----------
+$('bSave').onclick=()=>{
+ if(!shown){alert('No compass reading yet.');return}
+ const r=shown,ref=r.isTrue?'T':'M';
+ const note=`Az ${Math.round(r.h)}°${ref}`+(r.sd.strike!=null?`; Strike ${Math.round(r.sd.strike)}° Dip ${Math.round(r.sd.dip)}° (dip dir ${Math.round(r.sd.dipDir)}°${ref}, RHR)`:'');
+ $('msg').textContent='Getting GPS position…';
+ navigator.geolocation.getCurrentPosition(p=>{
+  const feats=S.get('feats',[]);const name=prompt('Name this reading:',`Reading ${feats.length+1}`);if(name===null){$('msg').textContent='';return}
+  const extra=prompt('Note (lithology, unit…):','')||'';
+  feats.push({t:'point',c:[[p.coords.latitude,p.coords.longitude]],name,note:note+(extra?'; '+extra:''),time:new Date().toISOString()});
+  S.set('feats',feats);$('msg').textContent=`Saved "${name}" to the map (±${Math.round(p.coords.accuracy)} m).`;
+ },err=>$('msg').textContent='GPS: '+err.message,{enableHighAccuracy:true,timeout:20000,maximumAge:5000});
+};
+if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js');
+</script>
+</body>
+</html>
